@@ -41,7 +41,12 @@ import (
 var testCaseCids []cid.Cid
 
 func init() {
-	for i := 0; i < 100; i++ {
+	testCaseCids = generateCIDs(100)
+}
+
+func generateCIDs(count int) []cid.Cid {
+	var result []cid.Cid
+	for i := 0; i < count; i++ {
 		v := fmt.Sprintf("%d -- value", i)
 
 		var newCid cid.Cid
@@ -63,8 +68,10 @@ func init() {
 			}
 			newCid = cid.NewCidV1(cid.Raw, mhv)
 		}
-		testCaseCids = append(testCaseCids, newCid)
+		result = append(result, newCid)
 	}
+
+	return result
 }
 
 type blankValidator struct{}
@@ -104,7 +111,9 @@ func (testAtomicPutValidator) Select(_ string, bs [][]byte) (int, error) {
 
 var testPrefix = ProtocolPrefix("/test")
 
-func setupDHT(ctx context.Context, t *testing.T, client bool, options ...Option) *IpfsDHT {
+func setupDHT(ctx context.Context, t testing.TB, client bool, options ...Option) *IpfsDHT {
+	t.Helper()
+
 	baseOpts := []Option{
 		testPrefix,
 		NamespacedValidator("v", blankValidator{}),
@@ -127,7 +136,9 @@ func setupDHT(ctx context.Context, t *testing.T, client bool, options ...Option)
 	return d
 }
 
-func setupDHTS(t *testing.T, ctx context.Context, n int, options ...Option) []*IpfsDHT {
+func setupDHTS(t testing.TB, ctx context.Context, n int, options ...Option) []*IpfsDHT {
+	t.Helper()
+
 	addrs := make([]ma.Multiaddr, n)
 	dhts := make([]*IpfsDHT, n)
 	peers := make([]peer.ID, n)
@@ -155,7 +166,7 @@ func setupDHTS(t *testing.T, ctx context.Context, n int, options ...Option) []*I
 	return dhts
 }
 
-func connectNoSync(t *testing.T, ctx context.Context, a, b *IpfsDHT) {
+func connectNoSync(t testing.TB, ctx context.Context, a, b *IpfsDHT) {
 	t.Helper()
 
 	idB := b.self
@@ -171,7 +182,7 @@ func connectNoSync(t *testing.T, ctx context.Context, a, b *IpfsDHT) {
 	}
 }
 
-func wait(t *testing.T, ctx context.Context, a, b *IpfsDHT) {
+func wait(t testing.TB, ctx context.Context, a, b *IpfsDHT) {
 	t.Helper()
 
 	// loop until connection notification has been received.
@@ -185,14 +196,14 @@ func wait(t *testing.T, ctx context.Context, a, b *IpfsDHT) {
 	}
 }
 
-func connect(t *testing.T, ctx context.Context, a, b *IpfsDHT) {
+func connect(t testing.TB, ctx context.Context, a, b *IpfsDHT) {
 	t.Helper()
 	connectNoSync(t, ctx, a, b)
 	wait(t, ctx, a, b)
 	wait(t, ctx, b, a)
 }
 
-func bootstrap(t *testing.T, ctx context.Context, dhts []*IpfsDHT) {
+func bootstrap(t testing.TB, ctx context.Context, dhts []*IpfsDHT) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -860,6 +871,38 @@ func TestPeriodicRefresh(t *testing.T) {
 
 	if u.Debug {
 		printRoutingTables(dhts)
+	}
+}
+
+var numDHTs = []int{2, 3, 5, 8, 13, 21, 34, 55, 89, 144}
+
+func BenchmarkProvide(b *testing.B) {
+	for _, nDHTs := range numDHTs {
+		b.Run(fmt.Sprintf("using-%d-DHTs", nDHTs), func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			dhts := setupDHTS(b, ctx, nDHTs)
+
+			for i := 0; i < nDHTs; i++ {
+				connect(b, ctx, dhts[i], dhts[(i+1)%len(dhts)])
+			}
+
+			<-time.After(100 * time.Millisecond)
+			ctxT, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			bootstrap(b, ctxT, dhts)
+
+			cids := generateCIDs(b.N)
+
+			b.ResetTimer()
+
+			for _, cid := range cids {
+				if err := dhts[0].Provide(ctx, cid, true); err != nil {
+					b.Fatal("error providing with error:", err)
+				}
+			}
+		})
 	}
 }
 

@@ -10,10 +10,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/multiformats/go-base32"
-	"github.com/multiformats/go-multiaddr"
-	"github.com/multiformats/go-multihash"
-
+	"github.com/gogo/protobuf/proto"
+	"github.com/ipfs/go-cid"
+	ds "github.com/ipfs/go-datastore"
+	dssync "github.com/ipfs/go-datastore/sync"
+	u "github.com/ipfs/go-ipfs-util"
+	logging "github.com/ipfs/go-log"
+	kb "github.com/libp2p/go-libp2p-kbucket"
+	record "github.com/libp2p/go-libp2p-record"
+	recpb "github.com/libp2p/go-libp2p-record/pb"
+	"github.com/libp2p/go-libp2p-xor/kademlia"
+	kadkey "github.com/libp2p/go-libp2p-xor/key"
+	"github.com/libp2p/go-libp2p-xor/trie"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -21,13 +29,12 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
 	swarm "github.com/libp2p/go-libp2p/p2p/net/swarm"
-
-	"github.com/gogo/protobuf/proto"
-	"github.com/ipfs/go-cid"
-	ds "github.com/ipfs/go-datastore"
-	dssync "github.com/ipfs/go-datastore/sync"
-	u "github.com/ipfs/go-ipfs-util"
-	logging "github.com/ipfs/go-log"
+	"github.com/multiformats/go-base32"
+	"github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multihash"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	kaddht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-kad-dht/crawler"
@@ -36,17 +43,6 @@ import (
 	"github.com/libp2p/go-libp2p-kad-dht/internal/net"
 	dht_pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	"github.com/libp2p/go-libp2p-kad-dht/providers"
-	kb "github.com/libp2p/go-libp2p-kbucket"
-
-	record "github.com/libp2p/go-libp2p-record"
-	recpb "github.com/libp2p/go-libp2p-record/pb"
-
-	"github.com/libp2p/go-libp2p-xor/kademlia"
-	kadkey "github.com/libp2p/go-libp2p-xor/key"
-	"github.com/libp2p/go-libp2p-xor/trie"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
 var Tracer = otel.Tracer("")
@@ -911,6 +907,12 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 	return numSuccess
 }
 
+func (dht *FullRT) ProvideManyIter(ctx context.Context, broadcast bool, iter kaddht.CidIter) (err error) {
+	//
+
+	return nil
+}
+
 func (dht *FullRT) ProvideMany(ctx context.Context, keys []multihash.Multihash) error {
 	ctx, span := Tracer.Start(ctx, "ProvideMany")
 	defer span.End()
@@ -924,13 +926,14 @@ func (dht *FullRT) ProvideMany(ctx context.Context, keys []multihash.Multihash) 
 		ID:    dht.h.ID(),
 		Addrs: dht.h.Addrs(),
 	}
-	pbPeers := dht_pb.RawPeerInfosToPBPeers([]peer.AddrInfo{pi})
 
 	// TODO: We may want to limit the type of addresses in our provider records
 	// For example, in a WAN-only DHT prohibit sharing non-WAN addresses (e.g. 192.168.0.100)
 	if len(pi.Addrs) < 1 {
 		return fmt.Errorf("no known addresses for self, cannot put provider")
 	}
+
+	pbPeers := dht_pb.RawPeerInfosToPBPeers([]peer.AddrInfo{pi})
 
 	fn := func(ctx context.Context, p, k peer.ID) error {
 		pmes := dht_pb.NewMessage(dht_pb.Message_ADD_PROVIDER, multihash.Multihash(k), 0)
@@ -944,7 +947,7 @@ func (dht *FullRT) ProvideMany(ctx context.Context, keys []multihash.Multihash) 
 		keysAsPeerIDs = append(keysAsPeerIDs, peer.ID(k))
 	}
 
-	return dht.bulkMessageSend(ctx, keysAsPeerIDs, fn, true)
+	return dht.bulkMessageSend(ctx, keysAsPeerIDs, fn)
 }
 
 func (dht *FullRT) PutMany(ctx context.Context, keys []string, values [][]byte) error {
@@ -972,16 +975,19 @@ func (dht *FullRT) PutMany(ctx context.Context, keys []string, values [][]byte) 
 		return dht.protoMessenger.PutValue(ctx, p, record.MakePutRecord(keyStr, keyRecMap[keyStr]))
 	}
 
-	return dht.bulkMessageSend(ctx, keysAsPeerIDs, fn, false)
+	return dht.bulkMessageSend(ctx, keysAsPeerIDs, fn)
 }
 
-func (dht *FullRT) bulkMessageSend(ctx context.Context, keys []peer.ID, fn func(ctx context.Context, target, k peer.ID) error, isProvRec bool) error {
+func (dht *FullRT) bulkMessageSend2(ctx context.Context, keys []peer.ID, fn func(ctx context.Context, target, k peer.ID) error) error {
 	ctx, span := Tracer.Start(ctx, "bulkMessageSend", trace.WithAttributes(attribute.Int("numKeys", len(keys))))
 	defer span.End()
 
-	if len(keys) == 0 {
-		return nil
-	}
+	return nil
+}
+
+func (dht *FullRT) bulkMessageSend(ctx context.Context, keys []peer.ID, fn func(ctx context.Context, target, k peer.ID) error) error {
+	ctx, span := Tracer.Start(ctx, "bulkMessageSend", trace.WithAttributes(attribute.Int("numKeys", len(keys))))
+	defer span.End()
 
 	type report struct {
 		successes   int

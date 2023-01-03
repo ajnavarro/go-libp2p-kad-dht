@@ -4,22 +4,23 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
+	"github.com/ipfs/go-cid"
+	u "github.com/ipfs/go-ipfs-util"
+	kb "github.com/libp2p/go-libp2p-kbucket"
+	record "github.com/libp2p/go-libp2p-record"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/multiformats/go-multihash"
 
-	"github.com/ipfs/go-cid"
-	u "github.com/ipfs/go-ipfs-util"
 	"github.com/libp2p/go-libp2p-kad-dht/internal"
 	internalConfig "github.com/libp2p/go-libp2p-kad-dht/internal/config"
 	"github.com/libp2p/go-libp2p-kad-dht/qpeerset"
-	kb "github.com/libp2p/go-libp2p-kbucket"
-	record "github.com/libp2p/go-libp2p-record"
-	"github.com/multiformats/go-multihash"
 )
 
 // This file implements the Routing interface for the IpfsDHT struct.
@@ -439,6 +440,22 @@ func (dht *IpfsDHT) Provide(ctx context.Context, key cid.Cid, brdcst bool) (err 
 		return context.DeadlineExceeded
 	}
 	return ctx.Err()
+}
+
+func (dht *IpfsDHT) ProvideManyIter(ctx context.Context, broadcast bool, iter CidIter) (err error) {
+	// TODO: get a group of cids to send to several peers
+	// TODO: organize that cids by XOR distance
+	// TODO: open a workpool to start sending cids to a group of peers.
+	// TODO: start calling Next again until io.EOF or error
+
+	return nil
+}
+
+type CidIter interface {
+	// Next returns the next cid on the queue. io.EOF is returned if there is no more cids to retrieve.
+	// You must call Close if you don't want to get more elements.
+	Next() (cid.Cid, error)
+	io.Closer
 }
 
 // FindProviders searches until the context expires.
